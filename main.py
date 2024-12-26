@@ -30,6 +30,9 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
+from playwright.sync_api import sync_playwright
+
+
 
 # Em vez de async_playwright, usaremos sync_playwright para ESSOR
 from playwright.sync_api import sync_playwright
@@ -42,8 +45,8 @@ load_dotenv()
 USERNAME_AXA = os.getenv('USUARIO_AXA')
 PASSWORD_AXA = os.getenv('PASSWORD_AXA')
 
-USERNAME_ESSOR = "08229681000176"
-PASSWORD_ESSOR = "Ins1709ert@"
+USERNAME_ESSOR = os.getenv('USUARIO_ESSOR')
+PASSWORD_ESSOR = os.getenv('PASSWORD_ESSOR')
 
 app = FastAPI()
 
@@ -63,8 +66,8 @@ def hello_root():
 
 def configurar_navegador_selenium(headless: bool = True):
     chrome_options = webdriver.ChromeOptions()
-    if headless:
-        chrome_options.add_argument("--headless")
+    #if headless:
+    #    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -80,9 +83,14 @@ def login_axa(driver):
         driver.get('https://portaldocorretor.axa.com.br/login/admin')
         wait = WebDriverWait(driver, 20)
 
+        # Aguarda 3 segundos
+        time.sleep(3)
+
         campo_login = wait.until(EC.presence_of_element_located((By.NAME, 'login')))
         campo_login.clear()
         campo_login.send_keys(USERNAME_AXA)
+
+        time.sleep(3)
 
         campo_senha = wait.until(EC.presence_of_element_located((By.NAME, 'pwd')))
         campo_senha.clear()
@@ -106,6 +114,8 @@ def consultar_dados_axa(driver, df_axa: pd.DataFrame) -> pd.DataFrame:
         logging.info("Página de 'Apolices e Endossos' carregada com sucesso na AXA.")
     except TimeoutException:
         logging.warning("A página de 'Apolices e Endossos' pode não ter carregado na AXA.")
+
+    time.sleep(3)
 
     # Inserir datas
     try:
@@ -144,7 +154,7 @@ def consultar_dados_axa(driver, df_axa: pd.DataFrame) -> pd.DataFrame:
             botao_filtrar.click()
             logging.info(f"Botão 'Filtrar' clicado para CNPJ '{cnpj}'.")
 
-            time.sleep(2)
+            time.sleep(5)
             try:
                 tabela = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table.tb-parcelas")))
                 linhas = tabela.find_elements(By.XPATH, ".//tbody/tr")
@@ -176,112 +186,102 @@ def consultar_dados_axa(driver, df_axa: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(resultados)
     else:
         return pd.DataFrame([])
+    
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from playwright.async_api import async_playwright
 
 
 def consultar_dados_essor_sync(df_essor: pd.DataFrame) -> pd.DataFrame:
-    """
-    Consulta ESSOR usando a API síncrona do Playwright, para evitar problemas
-    de NotImplementedError no Windows/Python3.12. Rodaremos esta função
-    em uma thread separada através do run_in_threadpool (FastAPI).
-    """
     resultados_essor = []
+    
+    # Check if DataFrame is empty synchronously
+    if len(df_essor) == 0:
+        logging.info("DataFrame ESSOR vazio - retornando DataFrame vazio")
+        return pd.DataFrame([])
 
     with sync_playwright() as p:
-        # Lançamos o chromium em modo headless (mude para False se quiser ver a janela)
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context()
         page = context.new_page()
 
         try:
             page.goto('https://portal.essor.com.br/')
-            logging.info("Página ESSOR acessada (síncrono).")
+            logging.info("Página ESSOR acessada.")
 
+            # Login
             page.fill('input[name="Login"]', USERNAME_ESSOR)
-            page.fill('input[name="Senha"]', PASSWORD_ESSOR)
+            page.fill('input[name="Senha"]', 'Insert1709@')
             page.click('button[type="submit"]')
             page.wait_for_load_state('networkidle')
-            logging.info("Login realizado no ESSOR (síncrono).")
+            logging.info("Login realizado no ESSOR.")
 
+            # Navegação
             page.click("text=Consultas")
             page.click("text=Parcelas Pendentes")
             page.wait_for_load_state('networkidle')
             logging.info("Página 'Parcelas Pendentes' no ESSOR carregada.")
 
-            # Verifica se existe campo #nr_apolice (assumindo que não está em iframe)
-            page.wait_for_selector('#nr_apolice', timeout=5000)
+            # aguarda 10 segundos
+            page.wait_for_timeout(10000)
 
             for index, row in df_essor.iterrows():
                 apolice = str(row['Apólice']).strip()
                 logging.info(f"Consultando apólice ESSOR: {apolice}")
 
-                # Preenche #nr_apolice
-                page.evaluate(f'''
-                    () => {{
-                        document.getElementById('nr_apolice').value = "{apolice}";
-                    }}
-                ''')
-                # Clica em 'Pesquisar'
-                page.evaluate('''
-                    () => {
-                        document.getElementById('btnPesquisar').click();
-                    }
-                ''')
+                # Preenche e pesquisa
+                page.evaluate(f'document.getElementById("nr_apolice").value = "{apolice}"')
+                page.evaluate('document.getElementById("btnPesquisar").click()')
 
-                time.sleep(3)  # Espera 3s para carregar resultados
+                # Espera pelos resultados
+                page.wait_for_timeout(3000)
 
-                has_table = page.evaluate('''
-                    () => {
-                        return document.getElementById('dataTableParcelas') !== null;
-                    }
-                ''')
+                # Verifica tabela
+                has_table = page.evaluate('document.getElementById("dataTableParcelas") !== null')
 
                 if has_table:
-                    table_data = page.evaluate('''
-                        () => {
-                            const rowsData = [];
-                            const table = document.getElementById('dataTableParcelas');
-                            if (!table) return rowsData;
-                            const rows = table.querySelectorAll('tbody tr');
-                            rows.forEach(row => {
-                                const cells = Array.from(row.children).map(td => td.innerText.trim());
-                                rowsData.push(cells);
-                            });
-                            return rowsData;
-                        }
-                    ''')
+                    table_data = page.evaluate('''() => {
+                        const rowsData = [];
+                        const table = document.getElementById('dataTableParcelas');
+                        if (!table) return rowsData;
+                        const rows = table.querySelectorAll('tbody tr');
+                        rows.forEach(row => {
+                            const cells = Array.from(row.children).map(td => td.innerText.trim());
+                            rowsData.push(cells);
+                        });
+                        return rowsData;
+                    }''')
 
-                    if len(table_data) == 1 and "Nenhum registro encontrado" in table_data[0][0]:
-                        logging.info(f"Nenhuma pendência para apólice {apolice}.")
-                    else:
-                        for data_row in table_data:
-                            if len(data_row) >= 8:
-                                resultados_essor.append({
-                                    'Apólice': apolice,
-                                    'Corretor Líder': data_row[0],
-                                    'Segurado': data_row[1],
-                                    'Apólice (2)': data_row[2],
-                                    'Endosso': data_row[3],
-                                    'Nº Parcela': data_row[4],
-                                    'Valor da Parcela': data_row[5],
-                                    'Data de vencimento': data_row[6],
-                                    'Dias em atraso': data_row[7],
-                                })
-                else:
-                    logging.info(f"Sem tabela de resultados para {apolice}.")
+                    if table_data and len(table_data) > 0:
+                        if len(table_data) == 1 and "Nenhum registro encontrado" in table_data[0][0]:
+                            logging.info(f"Nenhuma pendência para apólice {apolice}")
+                        else:
+                            for data_row in table_data:
+                                if len(data_row) >= 8:
+                                    resultados_essor.append({
+                                        'Apólice': apolice,
+                                        'Corretor Líder': data_row[0],
+                                        'Segurado': data_row[1],
+                                        'Apólice (2)': data_row[2],
+                                        'Endosso': data_row[3],
+                                        'Nº Parcela': data_row[4],
+                                        'Valor da Parcela': data_row[5],
+                                        'Data de vencimento': data_row[6],
+                                        'Dias em atraso': data_row[7],
+                                    })
 
-                # Limpa
-                page.evaluate('''
-                    () => {
-                        document.getElementById('nr_apolice').value = "";
-                    }
-                ''')
+                # Limpa o campo para próxima consulta
+                page.evaluate('document.getElementById("nr_apolice").value = ""')
 
         except Exception as e:
-            logging.error(f"Erro durante a consulta ESSOR (síncrona): {e}")
+            logging.error(f"Erro durante a consulta ESSOR: {e}")
+            raise e
         finally:
             browser.close()
 
-    return pd.DataFrame(resultados_essor)
+    return pd.DataFrame(resultados_essor) if resultados_essor else pd.DataFrame([])
 
 
 @app.post("/upload/")
