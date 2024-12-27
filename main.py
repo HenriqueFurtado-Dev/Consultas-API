@@ -196,92 +196,162 @@ from playwright.async_api import async_playwright
 
 def consultar_dados_essor_sync(df_essor: pd.DataFrame) -> pd.DataFrame:
     resultados_essor = []
-    
-    # Check if DataFrame is empty synchronously
+
+    # Se não houver registros para ESSOR, retorne um DataFrame vazio
     if len(df_essor) == 0:
         logging.info("DataFrame ESSOR vazio - retornando DataFrame vazio")
         return pd.DataFrame([])
 
     with sync_playwright() as p:
+        # Lança o browser (chromium)
         browser = p.chromium.launch(headless=False)
         context = browser.new_context()
         page = context.new_page()
 
         try:
+            # 1) Ir até a página de login
             page.goto('https://portal.essor.com.br/')
-            logging.info("Página ESSOR acessada.")
+            logging.info("Página de login ESSOR acessada.")
 
-            # Login
+            # 2) Fazer login
             page.fill('input[name="Login"]', USERNAME_ESSOR)
-            page.fill('input[name="Senha"]', 'Insert1709@')
+            page.fill('input[name="Senha"]', PASSWORD_ESSOR)
             page.click('button[type="submit"]')
             page.wait_for_load_state('networkidle')
             logging.info("Login realizado no ESSOR.")
 
-            # Navegação
+            # 3) Clicar em 'Consultas' e em seguida 'Parcelas Pendentes'
             page.click("text=Consultas")
             page.click("text=Parcelas Pendentes")
             page.wait_for_load_state('networkidle')
             logging.info("Página 'Parcelas Pendentes' no ESSOR carregada.")
 
-            # aguarda 10 segundos
-            page.wait_for_timeout(10000)
+            # 4) Verificar se o campo #nr_apolice (ou #nr_cnpj) está na página principal ou em um iframe
+            search_context = None
 
+            try:
+                # Tenta achar o seletor na página principal
+                page.wait_for_selector('#nr_apolice', timeout=10000)
+                logging.info("Campo '#nr_apolice' encontrado na página principal.")
+                search_context = page
+            except:
+                # Se não estiver na página principal, procurar nos frames
+                logging.warning("Não foi possível encontrar '#nr_apolice' na página principal. Tentando iframes...")
+
+                for frame in page.frames:
+                    try:
+                        frame.wait_for_selector('#nr_apolice', timeout=5000)
+                        search_context = frame
+                        logging.info("Campo '#nr_apolice' encontrado dentro de um iframe.")
+                        break
+                    except:
+                        continue
+
+            # Se mesmo assim não achar, aborta
+            if not search_context:
+                logging.error("Não foi possível encontrar o campo '#nr_apolice' em nenhum contexto.")
+                browser.close()
+                return pd.DataFrame([])
+
+            # 5) Iterar sobre cada linha do df_essor, pegando o valor que deseja pesquisar
             for index, row in df_essor.iterrows():
+
+                # Se for CNPJ, troque row['CNPJ'] ou row['CPF/CNPJ']. 
+                # Se for Apólice, mantenha row['Apólice'].  
+                # (No seu script “funcional”, você usava row['Apólice']. Ajuste conforme a real necessidade.)
                 apolice = str(row['Apólice']).strip()
                 logging.info(f"Consultando apólice ESSOR: {apolice}")
 
-                # Preenche e pesquisa
-                page.evaluate(f'document.getElementById("nr_apolice").value = "{apolice}"')
-                page.evaluate('document.getElementById("btnPesquisar").click()')
+                # 5.1) Preencher o campo (via JavaScript)
+                try:
+                    search_context.evaluate(f'''() => {{
+                        document.getElementById('nr_apolice').value = "{apolice}";
+                    }}''')
+                except Exception as e:
+                    logging.error(f"Erro ao preencher o campo '#nr_apolice' para a apólice '{apolice}': {e}")
+                    continue
 
-                # Espera pelos resultados
-                page.wait_for_timeout(3000)
-
-                # Verifica tabela
-                has_table = page.evaluate('document.getElementById("dataTableParcelas") !== null')
-
-                if has_table:
-                    table_data = page.evaluate('''() => {
-                        const rowsData = [];
-                        const table = document.getElementById('dataTableParcelas');
-                        if (!table) return rowsData;
-                        const rows = table.querySelectorAll('tbody tr');
-                        rows.forEach(row => {
-                            const cells = Array.from(row.children).map(td => td.innerText.trim());
-                            rowsData.push(cells);
-                        });
-                        return rowsData;
+                # 5.2) Clicar no botão 'Pesquisar'
+                try:
+                    search_context.evaluate('''() => {
+                        document.getElementById('btnPesquisar').click();
                     }''')
+                except Exception as e:
+                    logging.error(f"Erro ao clicar no botão 'Pesquisar' para apólice '{apolice}': {e}")
+                    continue
 
-                    if table_data and len(table_data) > 0:
-                        if len(table_data) == 1 and "Nenhum registro encontrado" in table_data[0][0]:
-                            logging.info(f"Nenhuma pendência para apólice {apolice}")
-                        else:
-                            for data_row in table_data:
-                                if len(data_row) >= 8:
-                                    resultados_essor.append({
-                                        'Apólice': apolice,
-                                        'Corretor Líder': data_row[0],
-                                        'Segurado': data_row[1],
-                                        'Apólice (2)': data_row[2],
-                                        'Endosso': data_row[3],
-                                        'Nº Parcela': data_row[4],
-                                        'Valor da Parcela': data_row[5],
-                                        'Data de vencimento': data_row[6],
-                                        'Dias em atraso': data_row[7],
-                                    })
+                # 5.3) Aguardar alguns segundos para que a tabela seja carregada
+                search_context.wait_for_timeout(3000)
 
-                # Limpa o campo para próxima consulta
-                page.evaluate('document.getElementById("nr_apolice").value = ""')
+                # 5.4) Verificar se a tabela existe
+                has_table = False
+                try:
+                    has_table = search_context.evaluate('''() => {
+                        return document.getElementById('dataTableParcelas') !== null;
+                    }''')
+                except Exception as e:
+                    logging.error(f"Erro ao verificar a existência da tabela para '{apolice}': {e}")
+
+                # 5.5) Se existe, extrair dados
+                if has_table:
+                    table_data = []
+                    try:
+                        table_data = search_context.evaluate('''() => {
+                            const data = [];
+                            const table = document.getElementById('dataTableParcelas');
+                            if(!table) return data;
+
+                            const rows = table.querySelectorAll('tbody tr');
+                            rows.forEach(row => {
+                                const cells = Array.from(row.children).map(td => td.innerText.trim());
+                                data.push(cells);
+                            });
+                            return data;
+                        }''')
+                    except Exception as e:
+                        logging.error(f"Erro ao extrair dados da tabela para '{apolice}': {e}")
+
+                    # Verifica se há alguma linha significativa (evitando 'Nenhum registro encontrado')
+                    if len(table_data) == 1 and "Nenhum registro encontrado" in table_data[0][0]:
+                        logging.info(f"Nenhuma pendência para apólice {apolice}")
+                        # Aqui, se quiser, já pode marcar 'SEM PENDENCIA' em algum DF
+                    else:
+                        # Adiciona linhas ao `resultados_essor`
+                        for data_row in table_data:
+                            if len(data_row) >= 8:
+                                resultados_essor.append({
+                                    'Apólice': apolice,
+                                    'Corretor Líder': data_row[0],
+                                    'Segurado': data_row[1],
+                                    'Apólice (2)': data_row[2],
+                                    'Endosso': data_row[3],
+                                    'Nº Parcela': data_row[4],
+                                    'Valor da Parcela': data_row[5],
+                                    'Data de vencimento': data_row[6],
+                                    'Dias em atraso': data_row[7],
+                                })
+                            else:
+                                logging.warning(f"Dados insuficientes para apólice {apolice}: {data_row}")
+                else:
+                    logging.info(f"Nenhuma tabela encontrada para a apólice {apolice}.")
+
+                # 5.6) Limpar o campo para a próxima iteração
+                try:
+                    search_context.evaluate('''() => {
+                        document.getElementById('nr_apolice').value = '';
+                    }''')
+                except:
+                    pass
 
         except Exception as e:
             logging.error(f"Erro durante a consulta ESSOR: {e}")
-            raise e
         finally:
             browser.close()
+            logging.info("Navegador ESSOR fechado.")
 
+    # Retorna o DataFrame final
     return pd.DataFrame(resultados_essor) if resultados_essor else pd.DataFrame([])
+
 
 
 @app.post("/upload/")
