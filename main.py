@@ -66,8 +66,8 @@ def hello_root():
 
 def configurar_navegador_selenium(headless: bool = True):
     chrome_options = webdriver.ChromeOptions()
-    #if headless:
-    #    chrome_options.add_argument("--headless")
+    if headless:
+       chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
