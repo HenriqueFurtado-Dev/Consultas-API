@@ -65,7 +65,7 @@ def hello_root():
     return {"message": "Hello World"}
 
 
-def configurar_navegador_selenium(headless: bool = True):
+def configurar_navegador_selenium(headless: bool = False):
     chrome_options = webdriver.ChromeOptions()
     if headless:
        chrome_options.add_argument("--headless")
@@ -205,7 +205,7 @@ def consultar_dados_essor_sync(df_essor: pd.DataFrame) -> pd.DataFrame:
 
     with sync_playwright() as p:
         # Lança o browser (chromium)
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context()
         page = context.new_page()
 
@@ -380,7 +380,7 @@ async def processar_planilha(file: UploadFile = File(...)):
         invoices_data_axa = pd.DataFrame()
 
         if not df_axa.empty:
-            driver = configurar_navegador_selenium(headless=True)
+            driver = configurar_navegador_selenium(headless=False)
             try:
                 login_axa(driver)
                 invoices_data_axa = consultar_dados_axa(driver, df_axa)
