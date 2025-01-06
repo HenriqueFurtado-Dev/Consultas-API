@@ -122,7 +122,7 @@ def consultar_dados_axa(driver, df_axa: pd.DataFrame) -> pd.DataFrame:
     try:
         campo_dt_ini = wait.until(EC.presence_of_element_located((By.ID, 'dt_ini')))
         campo_dt_ini.clear()
-        campo_dt_ini.send_keys('01/01/2024')
+        campo_dt_ini.send_keys('01/01/2025')
         logging.info("Data inicial '01/01/2024' inserida no campo dt_ini.")
     except Exception as e:
         raise Exception(f"Erro ao inserir data inicial na AXA: {e}")
@@ -205,7 +205,7 @@ def consultar_dados_essor_sync(df_essor: pd.DataFrame) -> pd.DataFrame:
 
     with sync_playwright() as p:
         # Lança o browser (chromium)
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
 
